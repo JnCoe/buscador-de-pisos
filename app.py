@@ -6,11 +6,14 @@ from typing import List, Tuple
 from flask import Flask, jsonify, request
 from werkzeug.utils import secure_filename
 
-from email_render import render_email_for_telegram
+from email_render import IDEALISTA_SUBJECT_MARKER, extract_idealista_listings, render_email_for_telegram
 from telegram_client import TelegramClient
 
 
 app = Flask(__name__)
+IGNORED_SUBJECTS = {
+    "Uno de tus favoritos ya no está publicado",
+}
 
 @app.get("/healthz")
 def healthz():
@@ -79,9 +82,54 @@ def email_trigger():
     body_plain = form.get("body-plain", "")
     body_html = form.get("body-html", "")
 
+    if (subject or "").strip() in IGNORED_SUBJECTS:
+        return jsonify({"ok": True, "ignored": True}), 200
+
     attachment_paths = _collect_attachments_to_tmp()
 
     tg = TelegramClient.from_env()
+
+    # Idealista formatted flow.
+    if IDEALISTA_SUBJECT_MARKER in (subject or "") and body_html:
+        listings = extract_idealista_listings(body_html)
+        for listing in listings:
+            lines: List[str] = []
+            lines.append("🚨NUEVO PISO🚨")
+            if listing.ubicacion:
+                lines.append(listing.ubicacion)
+            lines.append("")
+            if listing.precio:
+                lines.append(listing.precio)
+            if listing.area:
+                lines.append(listing.area)
+            if listing.habitaciones:
+                lines.append(listing.habitaciones)
+            if listing.planta:
+                lines.append(listing.planta)
+            lines.append("")
+            lines.append(f'<a href="{listing.url}">{listing.inmueble_id}</a>')
+            caption = "\n".join(lines).strip()
+
+            try:
+                local_img = tg.download_to_tmp(
+                    listing.image_url, filename_hint=f"idealista-{listing.inmueble_id}", timeout=5.0
+                )
+                tg.send_photo(
+                    path=local_img,
+                    filename=os.path.basename(local_img),
+                    caption=caption,
+                    parse_mode="HTML",
+                )
+            except Exception as exc:
+                # Fallback: log + text-only message.
+                tg.send_message(
+                    f"[idealista] Image download failed ({exc}). Sending text only."
+                )
+                tg.send_message(caption, parse_mode="HTML")
+
+        return jsonify({"ok": True, "idealista_listings": len(listings)}), 200
+
+    # Default generic flow for all other emails.
     text, link_list = render_email_for_telegram(
         sender=sender,
         recipient=recipient,
@@ -90,14 +138,11 @@ def email_trigger():
         body_html=body_html,
     )
 
-    # Send main message first.
     tg.send_message(text)
 
-    # Then send attachments (images/documents) separately.
     for path, original_name in attachment_paths:
         tg.send_file(path=path, filename=original_name)
 
-    # Finally, if we extracted links, send them as a separate message.
     if link_list:
         tg.send_message("\n".join(link_list))
 

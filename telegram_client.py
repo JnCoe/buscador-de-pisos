@@ -3,6 +3,7 @@ import os
 import time
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import urlparse
 
 import requests
 
@@ -52,6 +53,50 @@ class TelegramClient:
             files = {field: (filename or os.path.basename(path), f)}
             data = {"chat_id": self.chat_id}
             self._post_with_retry(method, data=data, files=files, timeout=20.0)
+
+    def send_photo(
+        self,
+        *,
+        path: str,
+        filename: Optional[str] = None,
+        caption: Optional[str] = None,
+        parse_mode: Optional[str] = None,
+    ) -> None:
+        with open(path, "rb") as f:
+            files = {"photo": (filename or os.path.basename(path), f)}
+            data = {"chat_id": self.chat_id}
+            if caption:
+                # Telegram caption limit is ~1024 chars for photos; keep it safe.
+                if len(caption) > 950:
+                    caption = caption[:950] + "\n\n[truncated]"
+                data["caption"] = caption
+            if parse_mode:
+                data["parse_mode"] = parse_mode
+            self._post_with_retry("sendPhoto", data=data, files=files, timeout=20.0)
+
+    def download_to_tmp(self, url: str, *, filename_hint: str, timeout: float = 5.0) -> str:
+        """
+        Downloads a remote file to /tmp and returns the local path.
+        Uses a short timeout to avoid hanging the webhook on Fly.io.
+        """
+        parsed = urlparse(url)
+        ext = os.path.splitext(parsed.path)[1]
+        if not ext or len(ext) > 8:
+            ext = ".bin"
+        safe_hint = "".join(ch for ch in filename_hint if ch.isalnum() or ch in ("-", "_"))[:64]
+        if not safe_hint:
+            safe_hint = "download"
+        out_path = os.path.join("/tmp", f"{safe_hint}{ext}")
+
+        resp = requests.get(url, timeout=(min(3.0, timeout), timeout), stream=True)
+        if resp.status_code != 200:
+            raise TelegramError(f"download failed ({resp.status_code})")
+        with open(out_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                f.write(chunk)
+        return out_path
 
     def _post_with_retry(
         self,
