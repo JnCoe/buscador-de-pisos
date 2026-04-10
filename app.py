@@ -6,13 +6,14 @@ from typing import List, Tuple
 from flask import Flask, jsonify, request
 from werkzeug.utils import secure_filename
 
-from email_render import IDEALISTA_SUBJECT_MARKER, extract_idealista_listings, render_email_for_telegram
+from email_render import IDEALISTA_SUBJECT_RE, extract_idealista_listings, render_email_for_telegram
 from telegram_client import TelegramClient
 
 
 app = Flask(__name__)
 IGNORED_SUBJECTS = {
     "Uno de tus favoritos ya no está publicado",
+    "Resumen diario de nuevos anuncios",
 }
 
 @app.get("/healthz")
@@ -90,7 +91,7 @@ def email_trigger():
     tg = TelegramClient.from_env()
 
     # Idealista formatted flow.
-    if IDEALISTA_SUBJECT_MARKER in (subject or "") and body_html:
+    if IDEALISTA_SUBJECT_RE.search(subject or "") and body_html:
         listings = extract_idealista_listings(body_html)
         for listing in listings:
             lines: List[str] = []
@@ -144,7 +145,7 @@ def email_trigger():
         tg.send_file(path=path, filename=original_name)
 
     if link_list:
-        tg.send_message("\n".join(link_list))
+        tg.send_message("\n".join(link_list), parse_mode="HTML")
 
     # --- Example local script execution (disabled by default) ---
     # If you ever want to run a local script instead (or in addition to Telegram),

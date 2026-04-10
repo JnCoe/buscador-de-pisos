@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import html as _html
 import re
 from typing import List, Tuple
+from urllib.parse import urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup, Comment
 
 
 TELEGRAM_MESSAGE_SOFT_LIMIT = 3900
-IDEALISTA_SUBJECT_MARKER = "Nuevo piso en tu búsqueda"
+IDEALISTA_SUBJECT_RE = re.compile(r"\bNuevo\s+\S+\s+en tu búsqueda\b", flags=re.IGNORECASE)
 IDEALISTA_INMUEBLE_PREFIX = "https://www.idealista.com/inmueble/"
 _IDEALISTA_CANONICAL_RE = re.compile(r"^https?://www\.idealista\.com/inmueble/(\d+)/")
 _AREA_RE = re.compile(r"\b\d+(?:[.,]\d+)?\s*m(?:²|2)\b", flags=re.IGNORECASE)
@@ -339,9 +341,78 @@ def render_email_for_telegram(
     if links:
         link_lines.append("Links:")
         for url in links[:50]:
-            link_lines.append(url)
+            link_lines.append(_format_collapsed_link_for_telegram(url))
         if len(links) > 50:
             link_lines.append(f"...and {len(links) - 50} more")
 
     return combined, link_lines
+
+
+def _collapse_url_for_display(url: str) -> tuple[str, str]:
+    """
+    Returns (href, display) where:
+    - href strips query/fragment (we don't need params after '?').
+    - display is a short "collapsed" representation suitable for Telegram.
+
+    Heuristic:
+    - base = scheme://netloc
+    - option1: base + first 2 path segments
+    - option2: base + full path (i.e. everything before '?')
+    - choose the more conservative (shorter) display, and append "..." if truncated.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return "", ""
+
+    split = urlsplit(raw)
+    if not split.scheme or not split.netloc:
+        # Not an absolute URL; keep as-is.
+        return raw, raw
+
+    base = f"{split.scheme}://{split.netloc}"
+    path = split.path or ""
+    href = urlunsplit((split.scheme, split.netloc, path, "", ""))
+
+    # option2: everything before '?': base + full path (no query/fragment already in href)
+    option2 = base + path
+    if option2.endswith("/") and option2 != base + "/":
+        option2 = option2[:-1]
+
+    # option1: base + up to two conservative segments
+    segments = [s for s in path.split("/") if s]
+    if segments:
+        option1 = base + "/" + "/".join(segments[:2])
+    else:
+        option1 = base
+
+    # Pick shorter display (more conservative).
+    display = option1 if len(option1) <= len(option2) else option2
+
+    truncated = False
+    if split.query or split.fragment:
+        truncated = True
+    if display == option1 and len(segments) > 2:
+        truncated = True
+    if display != option2:
+        truncated = True
+
+    if truncated and not display.endswith("..."):
+        display += "..."
+
+    # Keep display reasonably short even for weird long paths.
+    if len(display) > 140:
+        display = display[:140].rstrip("/") + "..."
+
+    return href, display
+
+
+def _format_collapsed_link_for_telegram(url: str) -> str:
+    href, display = _collapse_url_for_display(url)
+    if not href:
+        return ""
+    # Only format as a hyperlink when it looks like a real absolute URL.
+    if not (href.startswith("http://") or href.startswith("https://")):
+        return _html.escape(display or href)
+    # Telegram HTML parse_mode supports <a href="...">text</a>
+    return f'<a href="{_html.escape(href, quote=True)}">{_html.escape(display)}</a>'
 
